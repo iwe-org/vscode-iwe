@@ -1,8 +1,12 @@
 {
   "name": "iwe-vscode-extension",
-  "displayName": "IWE VSCode Extension",
-  "description": "IWE Server for VSCode Extension",
+  "displayName": "IWE",
+  "description": "Makdown notes navigation, auto-complete, search, etc",
   "version": "0.0.1",
+  "license": "MIT",
+  "icon": "assets/logo.png",
+  "publisher": "IWE",
+  "repository": "https://github.com/iwe-org/iwe",
   "engines": {
     "vscode": "^1.96.0"
   },
@@ -11,6 +15,17 @@
   ],
   "activationEvents": [
     "onLanguage:markdown"
+  ],
+  "keywords": [
+    "markdown",
+    "pkm",
+    "lsp",
+    "note",
+    "notes",
+    "link",
+    "links",
+    "references",
+    "zettelkasten"
   ],
   "main": "./dist/extension.js",
   "contributes": {
