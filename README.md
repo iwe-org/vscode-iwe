@@ -12,7 +12,11 @@
 - 🔄 Convert lists into headers and vice versa
 - 💡 Display inlay hints with parent note references and link counts
 
-## Installation
+## How to use
 
-1. Open the Extensions view by clicking on the Extensions icon in the Activity Bar on the side of the window or by pressing `Ctrl+Shift+X`.
-2. Search for "IWE" and click on the Install button.
+- **Code Actions** menu (`⌘`+`.`) to see available options for the current element
+- **Go to Definition** (`F12`) on a link to open the linked file
+- **Format Document** command (`Shift`+`Option`+`F`) to restructure/format the document
+- **Rename** command (`F2`) on a link will rename the file and update all the references
+
+Learn more at [iwe.md](https://iwe.md)
