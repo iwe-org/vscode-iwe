@@ -6,6 +6,7 @@ import * as os from 'os';
 import which from 'which';
 import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-languageclient/node';
 import * as tar from 'tar';
+import * as yauzl from 'yauzl';
 
 let client: LanguageClient;
 
@@ -56,10 +57,11 @@ async function getLanguageServerBinary(storagePath: string, context: vscode.Exte
 	if (cachedPath && fs.existsSync(cachedPath)) {
 		return cachedPath;
 	}
+	const binaryName = os.platform() === 'win32' ? 'iwes.exe' : 'iwes';
 
 	try {
 		// Check if 'iwes' is available in PATH
-		const iwesInPath = await which('iwes', { nothrow: true });
+		const iwesInPath = await which(binaryName, { nothrow: true });
 		if (iwesInPath) {
 			await context.globalState.update('iweBinaryPath', iwesInPath);
 			return iwesInPath;
@@ -76,7 +78,7 @@ async function getLanguageServerBinary(storagePath: string, context: vscode.Exte
 		const versionDir = path.join(storagePath, `iwe-${release.version}`);
 		fs.mkdirSync(versionDir, { recursive: true });
 
-		const binaryPath = path.join(versionDir, 'iwes');
+		const binaryPath = path.join(versionDir, binaryName);
 		await downloadAndExtractBinary(asset.browser_download_url, binaryPath);
 
 		await context.globalState.update('iweBinaryPath', binaryPath);
@@ -119,7 +121,8 @@ async function getLatestGithubRelease(): Promise<GithubRelease> {
 
 async function downloadAndExtractBinary(url: string, destPath: string): Promise<void> {
 	const tmpDir = path.join(path.dirname(destPath), 'tmp');
-	const archivePath = path.join(tmpDir, 'release.tar.gz');
+	const isWindows = os.platform() === 'win32';
+	const archivePath = path.join(tmpDir, isWindows ? 'release.zip' : 'release.tar.gz');
 	
 	await fs.promises.mkdir(tmpDir, { recursive: true });
 	
@@ -147,21 +150,27 @@ async function downloadAndExtractBinary(url: string, destPath: string): Promise<
 				file.on('finish', async () => {
 					file.close();
 					try {
-						// Extract the tar.gz file
-						await tar.x({
-							file: archivePath,
-							cwd: tmpDir
-						});
+						if (isWindows) {
+							await extractZip(archivePath, tmpDir);
+						} else {
+							await tar.x({
+								file: archivePath,
+								cwd: tmpDir
+							});
+						}
 
 						// Find and move the binary
 						const files = await fs.promises.readdir(tmpDir);
-						const binary = files.find(f => f === 'iwes' || f.endsWith('/iwes'));
+						const binaryName = isWindows ? 'iwes.exe' : 'iwes';
+						const binary = files.find(f => f === binaryName || f.endsWith(`/${binaryName}`));
 						if (!binary) {
 							throw new Error('Binary not found in archive');
 						}
 
 						await fs.promises.rename(path.join(tmpDir, binary), destPath);
-						await fs.promises.chmod(destPath, '755');
+						if (!isWindows) {
+							await fs.promises.chmod(destPath, '755');
+						}
 
 						// Cleanup
 						await fs.promises.rm(tmpDir, { recursive: true, force: true });
@@ -177,6 +186,45 @@ async function downloadAndExtractBinary(url: string, destPath: string): Promise<
 	});
 }
 
+function extractZip(zipPath: string, destPath: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
+			if (err) { reject(err); return; }
+			if (!zipfile) { reject(new Error('Failed to open zip file')); return; }
+
+			zipfile.on('error', reject);
+			zipfile.on('end', resolve);
+
+			zipfile.on('entry', (entry) => {
+				if (/\/$/.test(entry.fileName)) {
+					zipfile.readEntry(); // Skip directories
+					return;
+				}
+
+				zipfile.openReadStream(entry, (err, readStream) => {
+					if (err) { reject(err); return; }
+					if (!readStream) { reject(new Error('Failed to open read stream')); return; }
+
+					const outputPath = path.join(destPath, entry.fileName);
+					const outputDir = path.dirname(outputPath);
+
+					fs.promises.mkdir(outputDir, { recursive: true })
+						.then(() => {
+							const writeStream = fs.createWriteStream(outputPath);
+							readStream.pipe(writeStream);
+							writeStream.on('finish', () => {
+								zipfile.readEntry();
+							});
+						})
+						.catch(reject);
+				});
+			});
+
+			zipfile.readEntry();
+		});
+	});
+}
+
 function getAssetNameForPlatform(version: string): string {
 	const platform = os.platform();
 	const arch = os.arch();
@@ -187,7 +235,7 @@ function getAssetNameForPlatform(version: string): string {
 		case 'darwin':
 			return `${version}-universal-apple-darwin.tar.gz`;
 		case 'win32':
-			throw new Error('Windows is not supported at the moment');
+			return `${version}-x86_64-pc-windows-msvc.zip`;
 		default:
 			throw new Error(`Unsupported platform: ${platform}`);
 	}
