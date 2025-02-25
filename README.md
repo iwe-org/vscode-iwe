@@ -1,6 +1,6 @@
-# IWE Markdown notes assitant
+# IWE Markdown notes assistant
 
-[IWE](https://iwe.md) works as an **extension** for your favorite text editor and provides essential features for notes management, such as:
+[IWE](https://iwe.md) provides essential features for notes management, such as:
 
 - 🔍 Search through your notes
 - 🧭 Navigate through markdown links
@@ -18,5 +18,6 @@
 - **Go to Definition** (`F12`) on a link to open the linked file
 - **Format Document** command (`Shift`+`Option`+`F`) to restructure/format the document
 - **Rename** command (`F2`) on a link will rename the file and update all the references
+- Global notes **search** (⌘+T) using the headers text
 
 Learn more at [iwe.md](https://iwe.md)

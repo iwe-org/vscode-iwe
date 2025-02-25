@@ -2,7 +2,7 @@
   "name": "iwe",
   "displayName": "IWE",
   "description": "Makdown notes navigation, auto-complete, search, etc",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "license": "MIT",
   "icon": "assets/logo.png",
   "publisher": "IWE",
