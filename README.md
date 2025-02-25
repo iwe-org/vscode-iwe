@@ -18,6 +18,6 @@
 - **Go to Definition** (`F12`) on a link to open the linked file
 - **Format Document** command (`Shift`+`Option`+`F`) to restructure/format the document
 - **Rename** command (`F2`) on a link will rename the file and update all the references
-- Global notes **search** (⌘+T) using the headers text
+- Global notes **search** (`⌘+T`) using the headers text
 
 Learn more at [iwe.md](https://iwe.md)
