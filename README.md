@@ -20,4 +20,31 @@
 - **Rename** command (`F2`) on a link will rename the file and update all the references
 - Global notes **search** (`⌘`+`T`) using the headers text
 
+## Automatic Updates
+
+The extension automatically keeps the IWE language server up to date:
+
+- 🔄 **Auto-update** - Checks for updates every 24 hours by default
+- ⚙️ **Configurable** - Control update behavior in VS Code settings (`iwe.autoUpdate`, `iwe.updateCheckInterval`)
+- 🛠️ **Manual updates** - Use Command Palette: "IWE: Update Language Server"
+- 📢 **Smart notifications** - Get notified when updates are available with links to release notes
+
+### How to Update Manually
+
+To manually update the IWE language server:
+
+1. **Open Command Palette**: Press `⌘`+`Shift`+`P` (Mac) or `Ctrl`+`Shift`+`P` (Windows/Linux)
+2. **Type**: `IWE: Update Language Server`
+3. **Select** the command from the dropdown
+4. **Confirm** the update when prompted
+5. **Wait** for the download and restart to complete
+
+The extension will:
+- Download the latest version from GitHub releases
+- Replace the old binary automatically  
+- Restart the language server with the new version
+- Show a success notification when complete
+
+> **Note**: If auto-updates are enabled, you typically won't need to do this manually. The extension checks for updates automatically based on your configured interval.
+
 Learn more at [iwe.md](https://iwe.md)
