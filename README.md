@@ -1,6 +1,8 @@
-# IWE Markdown notes assistant
+# IWE for VS Code
 
-[IWE](https://iwe.md) provides essential features for notes management, such as:
+IWE is a Markdown knowledge base you and your AI agent work on together. This extension brings it into VS Code. See the [VS Code guide on iwe.md](https://iwe.md/docs/editors/vscode/).
+
+The extension provides essential features for notes management, such as:
 
 - 🔍 Search through your notes
 - 🧭 Navigate through markdown links

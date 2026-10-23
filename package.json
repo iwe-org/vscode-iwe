@@ -1,11 +1,12 @@
 {
   "name": "iwe",
-  "displayName": "IWE",
-  "description": "Markdown markdown-based note-taking and personal knowledge management (PKM) solution.",
+  "displayName": "IWE: Markdown Knowledge Base",
+  "description": "Markdown knowledge base you and your AI agent work on together: links, backlinks, search and refactoring for notes in VS Code.",
   "version": "0.0.4",
   "license": "MIT",
   "icon": "assets/logo.png",
   "publisher": "IWE",
+  "homepage": "https://iwe.md/docs/editors/vscode/",
   "repository": "https://github.com/iwe-org/iwe",
   "engines": {
     "vscode": "^1.96.0"
