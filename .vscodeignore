@@ -12,3 +12,8 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+.claude/**
+CLAUDE.md
+testFixture/**
+*.vsix
+.DS_Store

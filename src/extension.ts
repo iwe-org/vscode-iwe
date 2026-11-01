@@ -1,394 +1,351 @@
-import * as vscode from 'vscode';
-import * as path from 'path';
 import * as fs from 'fs';
-import * as https from 'https';
 import * as os from 'os';
-import which from 'which';
-import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-languageclient/node';
-import * as tar from 'tar';
-import * as yauzl from 'yauzl';
+import * as path from 'path';
+import * as vscode from 'vscode';
+import { LanguageClient, LanguageClientOptions, ServerOptions, State } from 'vscode-languageclient/node';
+import {
+	Release,
+	RELEASE_PAGE_URL,
+	fetchLatestRelease,
+	findInPath,
+	installRelease,
+	isNewerVersion,
+	removeOtherVersions,
+	serverBinaryName,
+} from './release';
 
-let client: LanguageClient;
+const STATE_BINARY_PATH = 'iweBinaryPath';
+const STATE_BINARY_VERSION = 'iweBinaryVersion';
+const STATE_LAST_CHECK = 'lastUpdateCheck';
+const STATE_EXTENSION_VERSION = 'lastExtensionVersion';
+const HOUR_MS = 60 * 60 * 1000;
 
-interface GithubRelease {
-	version: string;
-	assets: {
-		name: string;
-		browser_download_url: string;
-	}[];
+type BinarySource = 'setting' | 'path' | 'managed';
+
+interface ServerBinary {
+	path: string;
+	source: BinarySource;
+	version?: string;
 }
 
-function isNewerVersion(latestVersion: string, currentVersion: string): boolean {
-	// Remove 'v' prefix if present
-	const latest = latestVersion.replace(/^v/, '');
-	const current = currentVersion.replace(/^v/, '');
-	
-	const latestParts = latest.split('.').map(Number);
-	const currentParts = current.split('.').map(Number);
-	
-	// Pad arrays to same length
-	const maxLength = Math.max(latestParts.length, currentParts.length);
-	while (latestParts.length < maxLength) latestParts.push(0);
-	while (currentParts.length < maxLength) currentParts.push(0);
-	
-	for (let i = 0; i < maxLength; i++) {
-		if (latestParts[i] > currentParts[i]) return true;
-		if (latestParts[i] < currentParts[i]) return false;
+let extensionContext: vscode.ExtensionContext;
+let output: vscode.LogOutputChannel;
+let statusItem: vscode.StatusBarItem;
+let client: LanguageClient | undefined;
+let clientDisposables: vscode.Disposable[] = [];
+let currentBinary: ServerBinary | undefined;
+let downloadInProgress = false;
+let lifecycle: Promise<void> = Promise.resolve();
+
+function enqueue(task: () => Promise<void>): Promise<void> {
+	const next = lifecycle.then(task);
+	lifecycle = next.catch(() => undefined);
+	return next;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
+	extensionContext = context;
+	output = vscode.window.createOutputChannel('IWE', { log: true });
+	statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+	statusItem.name = 'IWE';
+	statusItem.command = 'iwe.showOutput';
+	context.subscriptions.push(output, statusItem);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('iwe.updateLanguageServer', () => enqueue(updateLanguageServer)),
+		vscode.commands.registerCommand('iwe.restartLanguageServer', () => enqueue(restartLanguageServer)),
+		vscode.commands.registerCommand('iwe.showOutput', () => output.show()),
+		vscode.workspace.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration('iwe.serverPath') || event.affectsConfiguration('iwe.debug')) {
+				void enqueue(restartLanguageServer);
+			}
+		}),
+		vscode.workspace.onDidChangeWorkspaceFolders(() => {
+			if (serverWorkingDirectory() !== client?.clientOptions.workspaceFolder?.uri.fsPath) {
+				void enqueue(restartLanguageServer);
+			}
+		}),
+	);
+
+	await resetUpdateCheckOnExtensionUpgrade(context);
+	await enqueue(startLanguageServer);
+}
+
+export async function deactivate(): Promise<void> {
+	await stopClient();
+}
+
+async function resetUpdateCheckOnExtensionUpgrade(context: vscode.ExtensionContext): Promise<void> {
+	const version = context.extension.packageJSON.version as string;
+	if (context.globalState.get<string>(STATE_EXTENSION_VERSION) !== version) {
+		await context.globalState.update(STATE_LAST_CHECK, 0);
+		await context.globalState.update(STATE_EXTENSION_VERSION, version);
 	}
-	
-	return false; // Versions are equal
 }
 
-async function cleanupOldBinaries(storagePath: string, currentVersion: string): Promise<void> {
+function setStatus(icon: string, tooltip: string): void {
+	statusItem.text = `${icon} IWE`;
+	statusItem.tooltip = tooltip;
+	statusItem.show();
+}
+
+function describeBinary(binary: ServerBinary): string {
+	const origin = binary.source === 'setting' ? 'iwe.serverPath' : binary.source === 'path' ? 'PATH' : 'managed by the extension';
+	const version = binary.version ? ` ${binary.version}` : '';
+	return `iwes${version} (${origin})\n${binary.path}`;
+}
+
+function serverWorkingDirectory(): string | undefined {
+	const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file');
+	const configured = folders.find(folder => fs.existsSync(path.join(folder.uri.fsPath, '.iwe', 'config.toml')));
+	return (configured ?? folders[0])?.uri.fsPath;
+}
+
+function expandHome(value: string): string {
+	return value === '~' || value.startsWith('~/') || value.startsWith('~\\')
+		? path.join(os.homedir(), value.slice(1))
+		: value;
+}
+
+function managedBinary(): ServerBinary | undefined {
+	const state = extensionContext.globalState;
+	const binaryPath = state.get<string>(STATE_BINARY_PATH);
+	const version = state.get<string>(STATE_BINARY_VERSION);
+	const storageDir = path.resolve(extensionContext.globalStorageUri.fsPath);
+	if (!binaryPath || !version || !path.resolve(binaryPath).startsWith(storageDir + path.sep) || !fs.existsSync(binaryPath)) {
+		return undefined;
+	}
+	return { path: binaryPath, source: 'managed', version };
+}
+
+async function resolveServerBinary(): Promise<ServerBinary> {
+	const configured = vscode.workspace.getConfiguration('iwe').get<string>('serverPath', '').trim();
+	if (configured) {
+		const resolved = expandHome(configured);
+		if (!fs.existsSync(resolved)) {
+			throw new Error(`iwe.serverPath points to a file that does not exist: ${resolved}`);
+		}
+		return { path: resolved, source: 'setting' };
+	}
+
+	const fromPath = await findInPath(serverBinaryName(process.platform));
+	if (fromPath) {
+		return { path: fromPath, source: 'path' };
+	}
+
+	const cached = managedBinary();
+	if (cached) {
+		return cached;
+	}
+
+	const release = await fetchLatestRelease();
+	await extensionContext.globalState.update(STATE_LAST_CHECK, Date.now());
+	return downloadRelease(release, vscode.ProgressLocation.Notification);
+}
+
+async function downloadRelease(release: Release, location: vscode.ProgressLocation): Promise<ServerBinary> {
+	downloadInProgress = true;
 	try {
-		const entries = await fs.promises.readdir(storagePath, { withFileTypes: true });
-		const versionDirs = entries.filter(entry => 
-			entry.isDirectory() && 
-			entry.name.startsWith('iwe-') && 
-			entry.name !== `iwe-${currentVersion}`
+		const binaryPath = await vscode.window.withProgress(
+			{ location, title: `Downloading IWE language server ${release.tag}` },
+			() => installRelease(release, extensionContext.globalStorageUri.fsPath, process.platform, process.arch),
 		);
-		
-		// Keep only the current version, remove others
-		for (const dir of versionDirs) {
-			const dirPath = path.join(storagePath, dir.name);
-			await fs.promises.rm(dirPath, { recursive: true, force: true });
+		await extensionContext.globalState.update(STATE_BINARY_PATH, binaryPath);
+		await extensionContext.globalState.update(STATE_BINARY_VERSION, release.tag);
+		output.info(`Installed iwes ${release.tag} at ${binaryPath}`);
+		return { path: binaryPath, source: 'managed', version: release.tag };
+	} finally {
+		downloadInProgress = false;
+	}
+}
+
+function updateCheckDue(): boolean {
+	const config = vscode.workspace.getConfiguration('iwe');
+	if (!config.get<boolean>('autoUpdate', true)) {
+		return false;
+	}
+	const intervalHours = Math.max(1, config.get<number>('updateCheckInterval', 24));
+	const lastCheck = extensionContext.globalState.get<number>(STATE_LAST_CHECK, 0);
+	return Date.now() - lastCheck >= intervalHours * HOUR_MS;
+}
+
+async function checkForUpdatesInBackground(installed: ServerBinary): Promise<void> {
+	try {
+		const release = await fetchLatestRelease();
+		await extensionContext.globalState.update(STATE_LAST_CHECK, Date.now());
+		if (!installed.version || !isNewerVersion(release.tag, installed.version)) {
+			output.info(`iwes ${installed.version} is up to date`);
+			return;
+		}
+		await downloadRelease(release, vscode.ProgressLocation.Window);
+		const choice = await vscode.window.showInformationMessage(
+			`IWE language server ${release.tag} is ready. Restart the server to use it.`,
+			'Restart Now',
+			'Release Notes',
+		);
+		if (choice === 'Restart Now') {
+			await enqueue(restartLanguageServer);
+		} else if (choice === 'Release Notes') {
+			await vscode.env.openExternal(vscode.Uri.parse(`${RELEASE_PAGE_URL}${release.tag}`));
 		}
 	} catch (error) {
-		// Ignore cleanup errors
-		console.warn('Failed to cleanup old binaries:', error);
+		output.warn(`Update check failed: ${errorMessage(error)}`);
 	}
 }
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
-export async function activate(context: vscode.ExtensionContext) {
-	// Check for extension version-based updates
-	await checkForExtensionUpdate(context);
-	
-	// Initialize language server
-	await activateLanguageServer(context);
-	
-	// Register manual update command
-	const updateCommand = vscode.commands.registerCommand('iwe.updateLanguageServer', async () => {
-		const result = await vscode.window.showWarningMessage(
-			'This will update the IWE language server to the latest version. Continue?',
-			'Update',
-			'Cancel'
-		);
-		
-		if (result === 'Update') {
-			try {
-				// Force update by clearing cache
-				await context.globalState.update('iweBinaryPath', undefined);
-				await context.globalState.update('iweBinaryVersion', undefined);
-				await context.globalState.update('lastUpdateCheck', 0);
-				
-				// Restart language server with new binary
-				if (client) {
-					await client.stop();
-				}
-				await activateLanguageServer(context);
-				
-				vscode.window.showInformationMessage('IWE language server updated successfully!');
-			} catch (error) {
-				vscode.window.showErrorMessage(`Failed to update language server: ${(error as Error).message}`);
-			}
+async function startLanguageServer(): Promise<void> {
+	setStatus('$(sync~spin)', 'Starting IWE language server');
+	let binary: ServerBinary;
+	try {
+		binary = await resolveServerBinary();
+	} catch (error) {
+		const message = `Failed to set up the IWE language server: ${errorMessage(error)}`;
+		output.error(message);
+		setStatus('$(error)', message);
+		const choice = await vscode.window.showErrorMessage(message, 'Retry', 'Show Output');
+		if (choice === 'Retry') {
+			void enqueue(startLanguageServer);
+		} else if (choice === 'Show Output') {
+			output.show();
 		}
-	});
-	
-	context.subscriptions.push(updateCommand);
-}
-
-async function checkForExtensionUpdate(context: vscode.ExtensionContext): Promise<void> {
-	const currentExtensionVersion = context.extension.packageJSON.version;
-	const lastExtensionVersion = context.globalState.get<string>('lastExtensionVersion');
-	
-	if (lastExtensionVersion !== currentExtensionVersion) {
-		// Extension was updated, refresh binary
-		await context.globalState.update('iweBinaryPath', undefined);
-		await context.globalState.update('iweBinaryVersion', undefined);
-		await context.globalState.update('lastUpdateCheck', 0);
-		await context.globalState.update('lastExtensionVersion', currentExtensionVersion);
-	}
-}
-
-async function activateLanguageServer(context: vscode.ExtensionContext): Promise<void> {
-	const serverPath = await getLanguageServerBinary(context.globalStorageUri.fsPath, context);
-	if (!serverPath) {
-		vscode.window.showErrorMessage('Failed to initialize IWE language server');
 		return;
 	}
 
-	// Create the language client and start it
+	currentBinary = binary;
+	output.info(`Using ${describeBinary(binary).replace('\n', ' at ')}`);
+
+	const cwd = serverWorkingDirectory();
+	const env = vscode.workspace.getConfiguration('iwe').get<boolean>('debug', false)
+		? { ...process.env, IWE_DEBUG: 'true' }
+		: process.env;
+
 	const serverOptions: ServerOptions = {
-		command: serverPath,
-		args: ['']
+		command: binary.path,
+		args: [],
+		options: { cwd, env },
 	};
+
+	const watcher = cwd
+		? vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(cwd, '**/*.md'))
+		: vscode.workspace.createFileSystemWatcher('**/*.md');
 
 	const clientOptions: LanguageClientOptions = {
 		documentSelector: [{ scheme: 'file', language: 'markdown' }],
-		synchronize: {
-			fileEvents: vscode.workspace.createFileSystemWatcher('**/*.md')
-		}
+		synchronize: { fileEvents: watcher },
+		outputChannel: output,
+		workspaceFolder: cwd ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd)) : undefined,
 	};
 
-	client = new LanguageClient(
-		'iweLanguageServer',
-		'IWE Language Server',
-		serverOptions,
-		clientOptions
-	);
+	const languageClient = new LanguageClient('iwe', 'IWE Language Server', serverOptions, clientOptions);
+	clientDisposables = [
+		watcher,
+		languageClient.onDidChangeState(event => {
+			if (languageClient !== client) {
+				return;
+			}
+			if (event.newState === State.Running) {
+				setStatus('$(book)', describeBinary(binary));
+			} else if (event.newState === State.Starting) {
+				setStatus('$(sync~spin)', 'Starting IWE language server');
+			} else {
+				setStatus('$(error)', 'IWE language server stopped');
+			}
+		}),
+	];
+	client = languageClient;
 
-	// Start the client
-	await client.start();
+	try {
+		await languageClient.start();
+	} catch (error) {
+		const message = `IWE language server failed to start: ${errorMessage(error)}`;
+		output.error(message);
+		setStatus('$(error)', message);
+		void vscode.window.showErrorMessage(message, 'Show Output').then(choice => {
+			if (choice) {
+				output.show();
+			}
+		});
+		return;
+	}
+
+	if (binary.source === 'managed') {
+		if (!downloadInProgress) {
+			await removeOtherVersions(extensionContext.globalStorageUri.fsPath, path.dirname(binary.path));
+		}
+		if (updateCheckDue()) {
+			void checkForUpdatesInBackground(binary);
+		}
+	}
 }
 
-async function getLanguageServerBinary(storagePath: string, context: vscode.ExtensionContext): Promise<string | undefined> {
-	const config = vscode.workspace.getConfiguration('iwe');
-	const autoUpdate = config.get<boolean>('autoUpdate', true);
-	const updateCheckInterval = config.get<number>('updateCheckInterval', 24);
-	
-	const cachedPath = context.globalState.get<string>('iweBinaryPath');
-	const cachedVersion = context.globalState.get<string>('iweBinaryVersion');
-	const lastUpdateCheck = context.globalState.get<number>('lastUpdateCheck', 0);
-	
-	const binaryName = os.platform() === 'win32' ? 'iwes.exe' : 'iwes';
-	
-	// Check for updates if auto-update is enabled and interval has passed
-	const shouldCheckForUpdates = autoUpdate && (Date.now() - lastUpdateCheck > updateCheckInterval * 60 * 60 * 1000);
-	
-	// If we have a cached binary and shouldn't check for updates, use it
-	if (cachedPath && fs.existsSync(cachedPath) && !shouldCheckForUpdates) {
-		return cachedPath;
+async function stopClient(): Promise<void> {
+	const stopping = client;
+	client = undefined;
+	const disposables = clientDisposables;
+	clientDisposables = [];
+	if (stopping) {
+		try {
+			await stopping.dispose();
+		} catch (error) {
+			output?.warn(`Failed to stop the language server cleanly: ${errorMessage(error)}`);
+		}
+	}
+	disposables.forEach(disposable => disposable.dispose());
+}
+
+async function restartLanguageServer(): Promise<void> {
+	await stopClient();
+	await startLanguageServer();
+}
+
+async function updateLanguageServer(): Promise<void> {
+	if (downloadInProgress) {
+		void vscode.window.showInformationMessage('An IWE language server download is already in progress.');
+		return;
+	}
+	const active = currentBinary ?? (await resolveServerBinary().catch(() => undefined));
+	if (active && active.source !== 'managed') {
+		const where = active.source === 'setting' ? 'the iwe.serverPath setting' : 'your PATH';
+		void vscode.window.showInformationMessage(
+			`IWE is using iwes from ${where} (${active.path}). Update it with the tool you installed it with, or remove it from ${where} to let the extension manage it.`,
+		);
+		return;
+	}
+
+	let release: Release;
+	try {
+		release = await vscode.window.withProgress(
+			{ location: vscode.ProgressLocation.Notification, title: 'Checking for IWE language server updates' },
+			() => fetchLatestRelease(),
+		);
+		await extensionContext.globalState.update(STATE_LAST_CHECK, Date.now());
+	} catch (error) {
+		void vscode.window.showErrorMessage(`Failed to check for updates: ${errorMessage(error)}`);
+		return;
+	}
+
+	if (active?.version && !isNewerVersion(release.tag, active.version)) {
+		void vscode.window.showInformationMessage(`IWE language server ${active.version} is already the latest version.`);
+		return;
 	}
 
 	try {
-		// Check if 'iwes' is available in PATH (developer mode)
-		const iwesInPath = await which(binaryName, { nothrow: true });
-		if (iwesInPath) {
-			await context.globalState.update('iweBinaryPath', iwesInPath);
-			await context.globalState.update('lastUpdateCheck', Date.now());
-			return iwesInPath;
-		}
-
-		// Fetch latest release information
-		const release = await getLatestGithubRelease();
-		await context.globalState.update('lastUpdateCheck', Date.now());
-		
-		// Check if we have a newer version available
-		const needsUpdate = !cachedVersion || isNewerVersion(release.version, cachedVersion);
-		
-		// If we have a cached binary and it's up to date, use it
-		if (cachedPath && fs.existsSync(cachedPath) && !needsUpdate) {
-			return cachedPath;
-		}
-		
-		// Download new version if needed
-		if (needsUpdate) {
-			const assetName = getAssetNameForPlatform(release.version);
-			const asset = release.assets.find(a => a.name === assetName);
-			if (!asset) {
-				throw new Error(`No matching asset found for platform: ${assetName}`);
-			}
-
-			const versionDir = path.join(storagePath, `iwe-${release.version}`);
-			fs.mkdirSync(versionDir, { recursive: true });
-
-			const binaryPath = path.join(versionDir, binaryName);
-			await downloadAndExtractBinary(asset.browser_download_url, binaryPath);
-
-			await context.globalState.update('iweBinaryPath', binaryPath);
-			await context.globalState.update('iweBinaryVersion', release.version);
-			
-			// Clean up old versions
-			await cleanupOldBinaries(storagePath, release.version);
-			
-			// Show update notification if this was an automatic update
-			if (cachedVersion && shouldCheckForUpdates) {
-				vscode.window.showInformationMessage(
-					`IWE language server updated to ${release.version}`,
-					'Show Release Notes'
-				).then(result => {
-					if (result === 'Show Release Notes') {
-						vscode.env.openExternal(vscode.Uri.parse(`https://github.com/iwe-org/iwe/releases/tag/${release.version}`));
-					}
-				});
-			}
-			
-			return binaryPath;
-		}
-		
-		// Fallback to cached version
-		return cachedPath;
-		
+		await downloadRelease(release, vscode.ProgressLocation.Notification);
 	} catch (error) {
-		// If we have a cached binary, fall back to it on network errors
-		if (cachedPath && fs.existsSync(cachedPath)) {
-			console.warn('Failed to check for updates, using cached binary:', error);
-			return cachedPath;
-		}
-		
-		vscode.window.showErrorMessage(`Failed to initialize IWE server: ${(error as Error).message}`);
-		return undefined;
+		void vscode.window.showErrorMessage(`Failed to download IWE language server ${release.tag}: ${errorMessage(error)}`);
+		return;
 	}
-}
 
-async function getLatestGithubRelease(): Promise<GithubRelease> {
-	const options = {
-		hostname: 'api.github.com',
-		path: '/repos/iwe-org/iwe/releases/latest',
-		headers: {
-			'User-Agent': 'VS Code IWE Extension'
-		}
-	};
-
-	return new Promise((resolve, reject) => {
-		https.get(options, (res) => {
-			let data = '';
-			res.on('data', chunk => data += chunk);
-			res.on('end', () => {
-				const response = JSON.parse(data);
-				// Transform the GitHub API response to match our interface
-				const release: GithubRelease = {
-					version: response.tag_name,
-					assets: response.assets.map((asset: any) => ({
-						name: asset.name,
-						browser_download_url: asset.browser_download_url
-					}))
-				};
-				resolve(release);
-			});
-			res.on('error', reject);
-		}).on('error', reject);
-	});
-}
-
-async function downloadAndExtractBinary(url: string, destPath: string): Promise<void> {
-	const tmpDir = path.join(path.dirname(destPath), 'tmp');
-	const isWindows = os.platform() === 'win32';
-	const archivePath = path.join(tmpDir, isWindows ? 'release.zip' : 'release.tar.gz');
-	
-	await fs.promises.mkdir(tmpDir, { recursive: true });
-	
-	return new Promise((resolve, reject) => {
-		const file = fs.createWriteStream(archivePath);
-		const downloadFile = (downloadUrl: string) => {
-			return https.get(downloadUrl, (res) => {
-				if (res.statusCode === 302 || res.statusCode === 301) {
-					const redirectUrl = res.headers.location;
-					if (!redirectUrl) {
-						reject(new Error('Redirect location header missing'));
-						return;
-					}
-					downloadFile(redirectUrl);
-					return;
-				}
-
-				if (res.statusCode !== 200) {
-					reject(new Error(`Server returned status code ${res.statusCode}`));
-					return;
-				}
-
-				res.pipe(file);
-
-				file.on('finish', async () => {
-					file.close();
-					try {
-						if (isWindows) {
-							await extractZip(archivePath, tmpDir);
-						} else {
-							await tar.x({
-								file: archivePath,
-								cwd: tmpDir
-							});
-						}
-
-						// Find and move the binary
-						const files = await fs.promises.readdir(tmpDir);
-						const binaryName = isWindows ? 'iwes.exe' : 'iwes';
-						const binary = files.find(f => f === binaryName || f.endsWith(`/${binaryName}`));
-						if (!binary) {
-							throw new Error('Binary not found in archive');
-						}
-
-						await fs.promises.rename(path.join(tmpDir, binary), destPath);
-						if (!isWindows) {
-							await fs.promises.chmod(destPath, '755');
-						}
-
-						// Cleanup
-						await fs.promises.rm(tmpDir, { recursive: true, force: true });
-						resolve();
-					} catch (err) {
-						reject(err);
-					}
-				});
-			}).on('error', reject);
-		};
-
-		downloadFile(url);
-	});
-}
-
-function extractZip(zipPath: string, destPath: string): Promise<void> {
-	return new Promise((resolve, reject) => {
-		yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
-			if (err) { reject(err); return; }
-			if (!zipfile) { reject(new Error('Failed to open zip file')); return; }
-
-			zipfile.on('error', reject);
-			zipfile.on('end', resolve);
-
-			zipfile.on('entry', (entry) => {
-				if (/\/$/.test(entry.fileName)) {
-					zipfile.readEntry(); // Skip directories
-					return;
-				}
-
-				zipfile.openReadStream(entry, (err, readStream) => {
-					if (err) { reject(err); return; }
-					if (!readStream) { reject(new Error('Failed to open read stream')); return; }
-
-					const outputPath = path.join(destPath, entry.fileName);
-					const outputDir = path.dirname(outputPath);
-
-					fs.promises.mkdir(outputDir, { recursive: true })
-						.then(() => {
-							const writeStream = fs.createWriteStream(outputPath);
-							readStream.pipe(writeStream);
-							writeStream.on('finish', () => {
-								zipfile.readEntry();
-							});
-						})
-						.catch(reject);
-				});
-			});
-
-			zipfile.readEntry();
+	await restartLanguageServer();
+	if (client?.isRunning()) {
+		void vscode.window.showInformationMessage(`IWE language server updated to ${release.tag}.`, 'Release Notes').then(choice => {
+			if (choice) {
+				void vscode.env.openExternal(vscode.Uri.parse(`${RELEASE_PAGE_URL}${release.tag}`));
+			}
 		});
-	});
-}
-
-function getAssetNameForPlatform(version: string): string {
-	const platform = os.platform();
-	const arch = os.arch();
-
-	switch (platform) {
-		case 'linux':
-			return `${version}-${arch === 'arm64' ? 'aarch64' : 'x86_64'}-unknown-linux-gnu.tar.gz`;
-		case 'darwin':
-			return `${version}-universal-apple-darwin.tar.gz`;
-		case 'win32':
-			return `${version}-x86_64-pc-windows-msvc.zip`;
-		default:
-			throw new Error(`Unsupported platform: ${platform}`);
 	}
-}
-
-// This method is called when your extension is deactivated
-export function deactivate(): Thenable<void> | undefined {
-	if (!client) {
-		return undefined;
-	}
-	return client.stop();
 }

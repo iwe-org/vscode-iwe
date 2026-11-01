@@ -22,31 +22,36 @@ The extension provides essential features for notes management, such as:
 - **Rename** command (`F2`) on a link will rename the file and update all the references
 - Global notes **search** (`⌘`+`T`) using the headers text
 
-## Automatic Updates
+## Language Server
 
-The extension automatically keeps the IWE language server up to date:
+The extension runs the IWE language server (`iwes`). It looks for it in this order:
 
-- 🔄 **Auto-update** - Checks for updates every 24 hours by default
-- ⚙️ **Configurable** - Control update behavior in VS Code settings (`iwe.autoUpdate`, `iwe.updateCheckInterval`)
-- 🛠️ **Manual updates** - Use Command Palette: "IWE: Update Language Server"
-- 📢 **Smart notifications** - Get notified when updates are available with links to release notes
+1. The path in the `iwe.serverPath` setting
+2. `iwes` on your `PATH`, for example installed with `cargo install iwes`, Homebrew or `npm install -g @iwe-org/iwe`
+3. A copy the extension downloads from [GitHub releases](https://github.com/iwe-org/iwe/releases) and keeps up to date
 
-### How to Update Manually
+Downloads are verified against the SHA-256 checksum published with each release. On Linux the static (musl) build is used, so it runs on any distribution.
 
-To manually update the IWE language server:
+The server runs in the workspace folder that contains `.iwe/config.toml`, or in the first workspace folder if none does.
 
-1. **Open Command Palette**: Press `⌘`+`Shift`+`P` (Mac) or `Ctrl`+`Shift`+`P` (Windows/Linux)
-2. **Type**: `IWE: Update Language Server`
-3. **Select** the command from the dropdown
-4. **Confirm** the update when prompted
-5. **Wait** for the download and restart to complete
+The status bar shows whether the server is running. Click it to open the IWE output.
 
-The extension will:
-- Download the latest version from GitHub releases
-- Replace the old binary automatically  
-- Restart the language server with the new version
-- Show a success notification when complete
+## Commands
 
-> **Note**: If auto-updates are enabled, you typically won't need to do this manually. The extension checks for updates automatically based on your configured interval.
+- **IWE: Restart Language Server**
+- **IWE: Update Language Server**: download the latest release now and restart the server
+- **IWE: Show Output**
+
+## Settings
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `iwe.serverPath` | `""` | Absolute path to an `iwes` binary |
+| `iwe.autoUpdate` | `true` | Check for language server updates in the background |
+| `iwe.updateCheckInterval` | `24` | Hours between update checks |
+| `iwe.debug` | `false` | Start the server with `IWE_DEBUG`, which writes `iwe.log` to the workspace folder |
+| `iwe.trace.server` | `"off"` | Log LSP traffic to the output panel (`off`, `messages`, `verbose`) |
+
+When an update is downloaded in the background, the extension asks you to restart the server so it can use the new version. Updates only apply to the downloaded copy. If `iwes` comes from `iwe.serverPath` or your `PATH`, update it with the tool you installed it with.
 
 Learn more at [iwe.md](https://iwe.md)

@@ -2,7 +2,7 @@
   "name": "iwe",
   "displayName": "IWE: Markdown Knowledge Base",
   "description": "Markdown knowledge base you and your AI agent work on together: links, backlinks, search and refactoring for notes in VS Code.",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "license": "MIT",
   "icon": "assets/logo.png",
   "publisher": "IWE",
@@ -15,7 +15,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onLanguage:markdown"
+    "onLanguage:markdown",
+    "workspaceContains:.iwe/config.toml"
   ],
   "keywords": [
     "markdown",
@@ -32,17 +33,29 @@
   "contributes": {
     "commands": [
       {
-        "command": "iwe.editor",
-        "title": "IWE"
+        "command": "iwe.restartLanguageServer",
+        "title": "Restart Language Server",
+        "category": "IWE"
       },
       {
         "command": "iwe.updateLanguageServer",
-        "title": "IWE: Update Language Server"
+        "title": "Update Language Server",
+        "category": "IWE"
+      },
+      {
+        "command": "iwe.showOutput",
+        "title": "Show Output",
+        "category": "IWE"
       }
     ],
     "configuration": {
       "title": "IWE",
       "properties": {
+        "iwe.serverPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to an `iwes` binary. When empty, the extension uses `iwes` from `PATH` or downloads the latest release."
+        },
         "iwe.autoUpdate": {
           "type": "boolean",
           "default": true,
@@ -51,7 +64,23 @@
         "iwe.updateCheckInterval": {
           "type": "number",
           "default": 24,
+          "minimum": 1,
           "description": "Hours between automatic update checks"
+        },
+        "iwe.debug": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Start the language server with `IWE_DEBUG` set, which writes a detailed `iwe.log` to the workspace folder."
+        },
+        "iwe.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the IWE language server"
         }
       }
     }
@@ -66,31 +95,27 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "publish": "vsce package",
-    "test:updates": "node test-updates.js",
-    "test:integration": "npm run compile && npm run test:updates"
+    "publish": "vsce package"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
-    "@types/node": "20.x",
-    "@types/tar": "^6.1.11",
+    "@types/node": "^20.19.43",
     "@types/vscode": "^1.96.0",
-    "@types/which": "^3.0.4",
-    "@typescript-eslint/eslint-plugin": "^8.17.0",
-    "@typescript-eslint/parser": "^8.17.0",
-    "@vscode/test-cli": "^0.0.10",
-    "@vscode/test-electron": "^2.4.1",
-    "eslint": "^9.16.0",
-    "ts-loader": "^9.5.1",
-    "typescript": "^5.7.2",
-    "webpack": "^5.95.0",
-    "webpack-cli": "^5.1.4"
+    "@types/yauzl": "^3.4.0",
+    "@typescript-eslint/eslint-plugin": "^8.72.1",
+    "@typescript-eslint/parser": "^8.72.1",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.1.0",
+    "eslint": "^10.14.0",
+    "ts-loader": "^9.6.2",
+    "typescript": "~6.0.3",
+    "webpack": "^5.112.2",
+    "webpack-cli": "^7.3.1"
   },
   "dependencies": {
-    "@types/yauzl": "^2.10.3",
-    "tar": "^6.2.0",
-    "vscode-languageclient": "^8.1.0",
-    "which": "^3.0.1",
-    "yauzl": "^3.2.0"
+    "tar": "^7.5.22",
+    "vscode-languageclient": "^11.0.0",
+    "yauzl": "^3.4.0"
   }
 }
